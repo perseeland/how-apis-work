@@ -71,6 +71,12 @@
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
   .fields.no-body { grid-template-columns: 1fr; }
   .fields.no-body .body-field { display: none; }
+  .bodysize { display: flex; align-items: center; gap: 10px; margin-top: 7px; font: 12px var(--mono); color: var(--muted); }
+  .bodysize #bodySizeText { white-space: nowrap; }
+  .bodysize .bar { flex: 1; min-width: 60px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .bodysize .bar i { display: block; height: 100%; width: 0; background: var(--td-green); transition: width .15s; }
+  .bodysize.over { color: var(--warn); font-weight: 700; }
+  .bodysize.over .bar i { background: var(--warn); }
   .fields label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   textarea { width: 100%; min-height: 96px; resize: vertical; font-family: var(--mono); font-size: 13px; }
   .btn { cursor: pointer; border: 1px solid var(--line2); background: var(--card2); border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 14px; }
@@ -157,7 +163,8 @@
       </div>
       <div class="fields" id="fields">
         <div><label for="headers">Headers <span style="color:var(--dim)">(<code>{{token}}</code> is replaced with the token from the login step)</span></label><textarea id="headers" spellcheck="false"></textarea></div>
-        <div class="body-field"><label for="body">Body (JSON)</label><textarea id="body" spellcheck="false"></textarea></div>
+        <div class="body-field"><label for="body">Body (JSON)</label><textarea id="body" spellcheck="false"></textarea>
+          <div class="bodysize" id="bodySize"><span id="bodySizeText"></span><span class="bar"><i id="bodySizeBar"></i></span></div></div>
       </div>
     </section>
 
@@ -187,6 +194,17 @@
 (() => {
   const BASE = 'https://dummyjson.com';
   const JSON_HDR = 'Content-Type: application/json';
+  const WAF_LIMIT = 8192; // 8 KB - the demo WAF's body inspection window
+
+  // A body where an innocent-looking first field fills the 8 KB window,
+  // pushing the real payload past the point a size-limited WAF stops inspecting.
+  const oversizedBody = (() => {
+    const filler = 'harmless padding, looks like a long comment. '.repeat(190); // ~8.4 KB
+    return JSON.stringify({
+      comment: filler.trim(),
+      username: "admin' OR '1'='1' --",
+    }, null, 2);
+  })();
 
   const STEPS = [
     { title: 'Ask for a list of things', method: 'GET', url: `${BASE}/products?limit=3&select=title,price`,
@@ -252,6 +270,14 @@
       notes: ['<code>username</code> carries a SQL injection: if the server builds <code>WHERE username = \'...\'</code> from it, the quote breaks out and <code>OR \'1\'=\'1\'</code> logs in without a password.',
               '<code>profileImage</code> carries an LFI / path traversal: <code>../</code> climbs out of the images folder to read <code>/etc/passwd</code>.',
               'In the response, look at <code>json</code> - both payloads arrived intact. Security tools must parse and inspect request bodies, not just URLs and headers.'] },
+    { title: 'Oversized body - past the WAF limit', method: 'POST', url: 'https://httpbin.org/anything', headers: JSON_HDR,
+      body: oversizedBody,
+      intro: 'A WAF that only inspects the first 8 KB of a body can be stepped around: fill the first 8 KB with harmless content, then put the payload after it. The app still parses the whole body.',
+      notes: ['Watch the <b>body size bar</b> above - this request is over 8 KB, so it turns amber.',
+              'The <code>comment</code> field is ~8 KB of harmless filler. The <code>username</code> SQL injection sits <b>after</b> the 8 KB mark.',
+              'If the WAF logs and inspects only the first 8 KB, it sees clean filler, finds nothing, and lets the request through. The application then parses the full JSON and reaches <code>username</code>.',
+              'In the httpbin response, <code>username</code> is present in full - the whole body reached the origin.',
+              'Mitigations: inspect the full body (raise or remove the size cap), or reject / flag bodies larger than the inspection limit instead of passing them uninspected.'] },
   ];
 
   const STATUS = {
@@ -267,6 +293,7 @@
   const el = {
     steps: $('steps'), stepNo: $('stepNo'), title: $('stepTitle'), intro: $('stepIntro'), notes: $('notes'),
     method: $('method'), url: $('url'), headers: $('headers'), body: $('body'), fields: $('fields'), send: $('send'),
+    bodySize: $('bodySize'), bodySizeText: $('bodySizeText'), bodySizeBar: $('bodySizeBar'),
     reqView: $('reqView'), resView: $('resView'), status: $('status'), jwt: $('jwt'),
   };
 
@@ -328,6 +355,13 @@
     const req = currentRequest();
     el.method.className = `m-${req.method}`;
     el.fields.classList.toggle('no-body', !hasBody(req.method));
+    const bytes = new TextEncoder().encode(req.body).length;
+    const over = bytes > WAF_LIMIT;
+    el.bodySize.classList.toggle('over', over);
+    el.bodySizeText.textContent = over
+      ? `Body size: ${bytes.toLocaleString()} bytes - ${(bytes - WAF_LIMIT).toLocaleString()} past the 8 KB WAF window`
+      : `Body size: ${bytes.toLocaleString()} bytes / 8,192 (8 KB) window`;
+    el.bodySizeBar.style.width = `${Math.min(100, (bytes / WAF_LIMIT) * 100)}%`;
     if (reqTab === 'curl') {
       const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
       let out = `curl -X ${req.method} ${q(req.url)}`;
